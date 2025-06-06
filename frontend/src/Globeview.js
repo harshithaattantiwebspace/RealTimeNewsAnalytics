@@ -5,16 +5,27 @@ import { motion } from "framer-motion";
 import { 
   Box, ChakraProvider, SimpleGrid, Heading, Text, Badge, 
   LinkBox, LinkOverlay, HStack, Spacer, Spinner, 
-  useColorMode, useColorModeValue, IconButton
+  useColorMode, useColorModeValue, IconButton, VStack
 } from "@chakra-ui/react";
 import { SunIcon, MoonIcon } from "@chakra-ui/icons";
 import axios from "axios";
 import "./GlobeView.css";
+import Plot from 'react-plotly.js';
 
 // Memoized NewsCard component for better performance
-const NewsCard = React.memo(({ title, source, date, link, isLoading }) => {
+const NewsCard = React.memo(({ title, source, date, link, sentiment_score, llm_summary, isLoading }) => {
   const cardBg = useColorModeValue("white", "gray.800");
   const cardBorder = useColorModeValue("gray.200", "gray.700");
+  
+  // Get sentiment color and label
+  const getSentimentInfo = (score) => {
+    if (score === null || score === undefined) return { color: "gray", label: "Neutral" };
+    if (score > 0.3) return { color: "green", label: "Positive" };
+    if (score < -0.3) return { color: "red", label: "Negative" };
+    return { color: "yellow", label: "Neutral" };
+  };
+
+  const sentimentInfo = getSentimentInfo(sentiment_score);
   
   return (
     <motion.div
@@ -39,9 +50,22 @@ const NewsCard = React.memo(({ title, source, date, link, isLoading }) => {
             {title}
           </Heading>
         </LinkOverlay>
+        
+        {llm_summary && (
+          <Text fontSize="sm" color="gray.600" mb={3} noOfLines={2}>
+            {llm_summary}
+          </Text>
+        )}
+        
         <Spacer />
         <HStack justify="space-between" mt={2}>
+          <HStack spacing={2}>
           <Badge colorScheme="blue">{source}</Badge>
+            <Badge colorScheme={sentimentInfo.color}>
+              {sentimentInfo.label}
+              {sentiment_score !== null && ` (${sentiment_score.toFixed(2)})`}
+            </Badge>
+          </HStack>
           <Text fontSize="sm" color="gray.500">
             {new Date(date).toLocaleDateString()}
           </Text>
@@ -58,7 +82,9 @@ function GlobeView() {
   const [hoverD, setHoverD] = useState();
   const [activeCountry, setActiveCountry] = useState();
   const [countryNews, setCountryNews] = useState([]);
+  const [countryAnalytics, setCountryAnalytics] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
   const [globeReady, setGlobeReady] = useState(false);
   const { colorMode, toggleColorMode } = useColorMode();
 
@@ -244,40 +270,39 @@ function GlobeView() {
   // Fetch news when a country is selected
   useEffect(() => {
     if (activeCountry) {
-      setLoading(true);
-      
-      const countryId = activeCountry.id || activeCountry.properties.id;
-      
-      const countryMapping = {
-        840: "us", // United States
-        356: "in", // India
-        392: "jp", // Japan
-        250: "fr", // France
-        826: "gb", // United Kingdom
-        124: "ca", // Canada
-        36: "au",  // Australia
-        276: "de", // Germany
-      };
-      
-      const countryCode = countryMapping[countryId];
-      
-      if (countryCode) {
-        const url = `http://127.0.0.1:8000/api/news/country/?country=${countryCode}`;
-        
-        axios.get(url)
-          .then(response => {
-            setCountryNews(response.data);
-            setLoading(false);
-          })
-          .catch(error => {
-            console.error("Error fetching news:", error);
-            setLoading(false);
-          });
-      } else {
-        setLoading(false);
-      }
+      fetchCountryData(activeCountry.id || activeCountry.properties.id);
     }
   }, [activeCountry]);
+
+  // Update the fetchCountryData function
+  const fetchCountryData = async (country) => {
+      setLoading(true);
+    setError(null);
+    try {
+      const [newsResponse, analyticsResponse] = await Promise.all([
+        axios.get(`/api/news/country/${country}/`),
+        axios.get(`/api/analytics/country/`, { params: { country } })
+      ]);
+
+      setCountryNews(newsResponse.data);
+      
+      // Ensure data structure matches backend
+      if (analyticsResponse.data) {
+        const formattedData = {
+          sentiment_trend: analyticsResponse.data.sentiment_trend || [],
+          entity_frequency: analyticsResponse.data.entity_frequency || {},
+          topic_distribution: analyticsResponse.data.topic_distribution || {},
+          llm_insights: analyticsResponse.data.llm_insights || []
+        };
+        setCountryAnalytics(formattedData);
+      }
+    } catch (err) {
+      console.error('Error fetching country data:', err);
+      setError('Failed to load country data. Please try again.');
+    } finally {
+        setLoading(false);
+      }
+  };
 
   // Preload textures for better performance
   useEffect(() => {
@@ -437,32 +462,190 @@ function GlobeView() {
                     />
                   </HStack>
                   
-                  {loading ? (
-                    <Box textAlign="center" py={10}>
-                      <Spinner size="xl" />
-                      <Text mt={4}>Loading news...</Text>
-                    </Box>
-                  ) : countryNews.length > 0 ? (
-                    <Box>
-                      <Heading size="md" mb={4}>Top News</Heading>
-                      <SimpleGrid columns={{ base: 1 }} spacing={4}>
-                        {countryNews.map((article, index) => (
-                          <NewsCard
-                            key={index}
-                            title={article.title}
-                            source={article.source || "Unknown source"}
-                            date={article.published_date}
-                            link={article.link}
-                            isLoading={loading}
-                          />
-                        ))}
-                      </SimpleGrid>
-                    </Box>
-                  ) : (
-                    <Box p={5} textAlign="center">
-                      <Text>No news available for this country.</Text>
+                  {/* Error Display */}
+                  {error && (
+                    <Box mb={6} p={4} bg="red.50" color="red.500" borderRadius="md">
+                      <Text>{error}</Text>
                     </Box>
                   )}
+
+                  {/* Sentiment Analytics Panel */}
+                  {loading ? (
+                    <Box mb={6} p={4} bg={useColorModeValue("gray.50", "gray.700")} borderRadius="md">
+                      <HStack justify="center" spacing={4}>
+                        <Spinner size="sm" />
+                        <Text>Loading analytics...</Text>
+                      </HStack>
+                    </Box>
+                  ) : countryAnalytics ? (
+                    <Box mb={6} p={4} bg={useColorModeValue("gray.50", "gray.700")} borderRadius="md">
+                      <Heading size="md" mb={4}>Sentiment Analysis</Heading>
+                      
+                      {/* Sentiment Summary */}
+                      <SimpleGrid columns={2} spacing={4}>
+                        <Box>
+                          <Text fontSize="sm" color="gray.500">Average Sentiment</Text>
+                          <Badge
+                            colorScheme={countryAnalytics.sentiment_trend[0]?.mean > 0 ? "green" : "red"}
+                            fontSize="lg"
+                            p={2}
+                          >
+                            {countryAnalytics.sentiment_trend[0]?.mean?.toFixed(2) || 'N/A'}
+                          </Badge>
+                        </Box>
+                    <Box>
+                          <Text fontSize="sm" color="gray.500">Article Count</Text>
+                          <Badge fontSize="lg" p={2}>
+                            {countryAnalytics.sentiment_trend[0]?.count || 0}
+                          </Badge>
+                        </Box>
+                      </SimpleGrid>
+
+                      {/* Sentiment Trend Chart */}
+                      {countryAnalytics.sentiment_trend?.length > 0 && (
+                        <Box mt={4}>
+                          <Text fontSize="sm" color="gray.500" mb={2}>Sentiment Trend</Text>
+                          <Plot
+                            data={[
+                              {
+                                x: countryAnalytics.sentiment_trend.map(item => item.date),
+                                y: countryAnalytics.sentiment_trend.map(item => item.mean),
+                                type: 'scatter',
+                                mode: 'lines+markers',
+                                name: 'Sentiment',
+                                line: { color: '#3182CE' },
+                                marker: { size: 8 }
+                              }
+                            ]}
+                            layout={{
+                              height: 200,
+                              margin: { t: 10, r: 10, b: 30, l: 40 },
+                              paper_bgcolor: 'rgba(0,0,0,0)',
+                              plot_bgcolor: 'rgba(0,0,0,0)',
+                              font: { color: useColorModeValue('#2D3748', '#E2E8F0') },
+                              xaxis: {
+                                showgrid: false,
+                                tickangle: -45,
+                                tickfont: { size: 10 }
+                              },
+                              yaxis: {
+                                showgrid: true,
+                                gridcolor: useColorModeValue('#E2E8F0', '#4A5568'),
+                                zeroline: false,
+                                range: [-1, 1]
+                              }
+                            }}
+                            config={{ displayModeBar: false }}
+                          />
+                        </Box>
+                      )}
+
+                      {/* Topic Distribution */}
+                      {countryAnalytics.topic_distribution && Object.keys(countryAnalytics.topic_distribution).length > 0 && (
+                        <Box mt={4}>
+                          <Text fontSize="sm" color="gray.500" mb={2}>Topic Distribution</Text>
+                          <SimpleGrid columns={2} spacing={2}>
+                            {Object.entries(countryAnalytics.topic_distribution)
+                              .sort(([, a], [, b]) => b - a)
+                              .slice(0, 4)
+                              .map(([topic, weight]) => (
+                                <Box 
+                                  key={topic} 
+                                  p={2} 
+                                  bg={useColorModeValue("white", "gray.600")} 
+                                  borderRadius="md"
+                                  boxShadow="sm"
+                                >
+                                  <HStack justify="space-between">
+                                    <Text fontSize="sm" fontWeight="medium">
+                                      {topic}
+                                    </Text>
+                                    <Badge colorScheme="purple">
+                                      {(weight * 100).toFixed(1)}%
+                                    </Badge>
+                                  </HStack>
+                                </Box>
+                              ))}
+                          </SimpleGrid>
+                        </Box>
+                      )}
+
+                      {/* Enhanced Entity Display */}
+                      {countryAnalytics.entity_frequency && Object.keys(countryAnalytics.entity_frequency).length > 0 && (
+                        <Box mt={4}>
+                          <Text fontSize="sm" color="gray.500" mb={2}>Top Entities</Text>
+                          <SimpleGrid columns={2} spacing={2}>
+                            {Object.entries(countryAnalytics.entity_frequency)
+                              .sort(([, a], [, b]) => b - a)
+                              .slice(0, 6)
+                              .map(([entity, count]) => (
+                                <Box 
+                                  key={entity} 
+                                  p={2} 
+                                  bg={useColorModeValue("white", "gray.600")} 
+                                  borderRadius="md"
+                                  boxShadow="sm"
+                                >
+                                  <HStack justify="space-between">
+                                    <VStack align="start" spacing={0}>
+                                      <Text fontSize="sm" fontWeight="medium">
+                                        {entity.split('_')[0]}
+                                      </Text>
+                                      <Text fontSize="xs" color="gray.500">
+                                        {entity.split('_')[1] || 'Unknown'}
+                                      </Text>
+                                    </VStack>
+                                    <Badge colorScheme="blue">{count}</Badge>
+                                  </HStack>
+                                </Box>
+                        ))}
+                      </SimpleGrid>
+                        </Box>
+                      )}
+
+                      {/* LLM Insights */}
+                      {countryAnalytics.llm_insights && countryAnalytics.llm_insights.length > 0 && (
+                        <Box mt={4}>
+                          <Text fontSize="sm" color="gray.500" mb={2}>Key Insights</Text>
+                          <VStack spacing={2} align="stretch">
+                            {countryAnalytics.llm_insights.map((insight, index) => (
+                              <Box 
+                                key={index}
+                                p={2}
+                                bg={useColorModeValue("white", "gray.600")}
+                                borderRadius="md"
+                                boxShadow="sm"
+                              >
+                                <Text fontSize="sm">{insight}</Text>
+                              </Box>
+                            ))}
+                          </VStack>
+                        </Box>
+                      )}
+                    </Box>
+                  ) : (
+                    <Box mb={6} p={4} bg={useColorModeValue("gray.50", "gray.700")} borderRadius="md">
+                      <Text textAlign="center" color="gray.500">
+                        No analytics available for this country.
+                      </Text>
+                    </Box>
+                  )}
+
+                  {/* News Cards */}
+                  <SimpleGrid columns={1} spacing={4}>
+                    {countryNews.map((article, index) => (
+                      <NewsCard
+                        key={index}
+                        title={article.title}
+                        source={article.source}
+                        date={article.published_date}
+                        link={article.link}
+                        sentiment_score={article.sentiment_score}
+                        llm_summary={article.llm_summary}
+                        isLoading={loading}
+                      />
+                    ))}
+                  </SimpleGrid>
                 </Box>
               </motion.div>
             </Box>
